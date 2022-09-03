@@ -23,84 +23,119 @@ namespace TrashRadar {
 		[HarmonyPatch]
 		public class RareCanFish {
 
-			internal static SortedDictionary<int, FishSwim> treasureFishList = new();
+			internal static SortedDictionary<int, (FishSwim, bool)> treasureFishList = new();
 			internal static GameObject sparkPref = null;
-
-			[HarmonyPatch(typeof(FishSwim), nameof(FishSwim.Update))]
-			[HarmonyPostfix]
-			public static void FishSwimUpdatePatch(FishSwim __instance) {
-				bool treasureFish = FishingManager.Instance.CheckGomi(__instance.FishId);
-				bool onList = treasureFishList.ContainsKey(__instance.UniqueId);
-				if (treasureFish && GetFishDist(__instance) < 500f) {
-					if (onList) return;
-					treasureFishList.Add(__instance.UniqueId, __instance);
-					log.LogInfo($"Found trash {__instance.UniqueId}");
-					AddFishSparks(__instance);
-				}
-				else if (onList) {
-					var removed = RemoveFishSparks(__instance);
-					if (removed) log.LogInfo($"Removing trash {__instance.UniqueId} from trash list (too far)");
-				}
-			}
-
-			[HarmonyPatch(typeof(FishSwim), nameof(FishSwim.OnDestroy))]
-			[HarmonyPrefix]
-			public static void FishSwimOnDestroyPatch(FishSwim __instance) {
-				var removed = RemoveFishSparks(__instance);
-				if (removed) log.LogInfo($"Removing trash {__instance.UniqueId} from trash list (destroyed)");
-			}
-
-			[HarmonyPatch(typeof(FishingManager), nameof(FishingManager.FishHit))]
-			[HarmonyPostfix]
-			public static void FishHitPatch(FishingManager __instance) {
-				var fish = __instance.targetFish;
-				if (fish == null) return;
-				var removed = RemoveFishSparks(fish);
-				if (removed) log.LogInfo($"Removing trash {fish.UniqueId} from trash list (catched)");
-			}
 
 			[HarmonyPatch(typeof(FocusObjectName), nameof(FocusObjectName.UpdateFocus))]
 			[HarmonyPostfix]
 			public static void UpdateFocusPatch(FocusObjectName __instance, FocusInterface focusObect) {
-				if (focusObect != null) return;
-				var nearestDist = GetNearestTreasureFishDist();
-				if (nearestDist == null) return;
+				if (focusObect is not null) return;
+				var nearestFish = GetNearestTreasureFish();
+				if (nearestFish.Item1 == float.MaxValue) return;
 				__instance.FocusOn();
-				__instance.SetText($"Trash nearby ({nearestDist})", Color.yellow);
+				__instance.SetText($"Trash nearby ({(int)nearestFish.Item1})", nearestFish.Item2 ? Color.cyan : Color.yellow);
 			}
 
 			[HarmonyPatch(typeof(FishSwim), nameof(FishSwim.FadeIn))]
 			[HarmonyPostfix]
 			public static void FadeInPatch(FishSwim __instance) {
-				log.LogMessage($"Fade in\t{__instance.UniqueId},\tdist {Mathf.Round(GetFishDist(__instance))},\tposition {__instance.transform.position}");
+				log.LogInfo($"Fade in {__instance.UniqueId}, dist {Mathf.Round(GetFishDist(__instance))}, position {__instance.transform.position}");
+				var fishMan = FishingManager.Instance;
+				bool treasureFishOrig = fishMan.CheckGomi(__instance.FishId);
+
+				if (!treasureFishOrig && __instance.Size < 500) {
+					var reRoll = FishingGomiDataTable.ReLottery(fishMan.EquipRod);
+					bool reRoolSucc = reRoll is ItemID.Item_Akikan or ItemID.Item_Nagagutsu or ItemID.Item_Reanaakikan;
+					log.LogInfo($"Re-roll fish {__instance.UniqueId} (from {(int)__instance.FishId}): {(reRoolSucc?"success":"failed")}");
+					if (reRoolSucc) {
+						ChangeFish(__instance, reRoll);
+					}
+				}
+
+				bool treasureFish = FishingManager.Instance.CheckGomi(__instance.FishId);
+				bool onList = treasureFishList.ContainsKey(__instance.UniqueId);
+				if (treasureFish) {
+					if (onList) return;
+					treasureFishList.Add(__instance.UniqueId, (__instance, treasureFishOrig));
+					log.LogInfo($"Found trash {__instance.UniqueId}");
+					AddFishSparks(__instance);
+				}
+				else if (onList) {
+					var removed = RemoveFishSparks(__instance);
+					if (removed) log.LogInfo($"Removing trash {__instance.UniqueId} from trash list (changed)");
+				}
 			}
 
 			[HarmonyPatch(typeof(FishSwim), nameof(FishSwim.FadeOut))]
-			[HarmonyPostfix]
+			[HarmonyPrefix]
 			public static void FadeOutPatch(FishSwim __instance) {
-				log.LogMessage($"Fade out\t{__instance.UniqueId},\tdist {Mathf.Round(GetFishDist(__instance))},\tposition {__instance.transform.position}");
+				log.LogInfo($"Fade out {__instance.UniqueId}, dist {Mathf.Round(GetFishDist(__instance))}, position {__instance.transform.position}");
+				var removed = RemoveFishSparks(__instance);
+				if (removed) log.LogInfo($"Removing trash {__instance.UniqueId} from trash list (fade out)");
+			}
+
+			[HarmonyPatch(typeof(FishingManager), nameof(FishingManager.Remove))]
+			[HarmonyPrefix]
+			public static void RemovePatch(FishingManager __instance, int unique_id) {
+				var exist = __instance.AimingFish.ContainsKey(unique_id);
+				if (exist) {
+					var fish = __instance.AimingFish[unique_id];
+					log.LogInfo($"Remove {fish.UniqueId}, dist {Mathf.Round(GetFishDist(fish))}, position {__instance.transform.position}");
+					var removed = RemoveFishSparks(fish);
+					if (removed) log.LogInfo($"Removing trash {fish.UniqueId} from trash list (catched)");
+				}
+			}
+
+			[HarmonyPatch(typeof(FishingManager), nameof(FishingManager.ReLottery))]
+			[HarmonyPrefix]
+			public static bool ReLotteryPatch(ItemID item_id, ref ItemID __result) {
+				__result = item_id;
+				return false;
+			}
+
+			[HarmonyPatch(typeof(FishingManager), nameof(FishingManager.Create))]
+			[HarmonyPostfix]
+			public static void CreatePatch(FishingPoint point, int max) {
+				HUDController.Instance.SetAreaChangeText($"Entering {point.name} ({max})");
+			}
+
+			[HarmonyPatch(typeof(FishingPoint), nameof(FishingPoint.DeleteFish))]
+			[HarmonyPostfix]
+			public static void DeleteFishPatch(FishingPoint __instance) {
+				HUDController.Instance.SetAreaChangeText($"Leaving {__instance.name}");
+			}
+
+			internal static void ChangeFish(FishSwim fish, ItemID item) {
+				if (fish is null) return;
+				var fishData = FishData.GetFishData(item);
+				if (fishData is null) return;
+				fish.FishId = fishData.ItemId;
+				fish.Size = Random.RandomRangeInt(10 * fishData.Min, 10 * fishData.Max);
 			}
 
 			internal static float GetFishDist(FishSwim fish) {
-				if (PlayerManager.Character == null || fish == null || fish.gameObject == null || !fish.gameObject.active) return float.MaxValue;
+				if (PlayerManager.Character is null || fish is null || fish.gameObject is null || !fish.gameObject.active) return float.MaxValue;
 				float dist = Vector3.Distance(fish.transform.position, PlayerManager.Character.transform.position);
 				return dist;
 			}
 
-			internal static int? GetNearestTreasureFishDist() {
-				float shortest = 501f;
-				foreach (var (_, fish) in treasureFishList) {
+			internal static (float, bool) GetNearestTreasureFish() {
+				var shortest = (501f, false);
+				foreach (var (_, (fish, roll)) in treasureFishList) {
 					float dist = GetFishDist(fish);
-					shortest = Mathf.Min(shortest, dist);
+					if (dist < shortest.Item1) {
+						shortest = (dist, roll);
+					}
 				}
-				return shortest >= 500f ? null : (int?)Mathf.Round(shortest);
+				shortest.Item1 = shortest.Item1 >= 500f ? float.MaxValue : Mathf.Round(shortest.Item1);
+				return (shortest.Item1, shortest.Item2);
 			}
 
 			internal static bool RemoveFishSparks(FishSwim fish) {
 				var result = treasureFishList.Remove(fish.UniqueId);
 				var name = fish.gameObject.name + "_Sparks";
 				var sparkle = fish.gameObject.FindGameObject(name);
-				if (sparkle != null) {
+				if (sparkle is not null) {
 					GameObject.Destroy(sparkle);
 				}
 				return result;
@@ -108,20 +143,20 @@ namespace TrashRadar {
 
 			internal static void LoadSparkPref() {
 				var defOGItem = OnGroundItem.BaseAssetOnGroundItem;
-				if (defOGItem == null) return;
+				if (defOGItem is null) return;
 				var sparkles = defOGItem.GetChildren(true);
-				if (sparkles == null || sparkles.Count < 1) return;
+				if (sparkles is null || sparkles.Count < 1) return;
 				var particleOmitters = sparkles[0].GetChildren(true);
-				if (particleOmitters == null || particleOmitters.Count < 1) return;
+				if (particleOmitters is null || particleOmitters.Count < 1) return;
 				sparkPref = particleOmitters[0];
 				log.LogInfo($"Set default spark prefab");
 			}
 
 			internal static void AddFishSparks(FishSwim fish) {
-				if (sparkPref == null) LoadSparkPref();
-				if (sparkPref == null) return;
+				if (sparkPref is null) LoadSparkPref();
+				if (sparkPref is null) return;
 				var fishTf = fish.transform;
-				if (fishTf == null) return;
+				if (fishTf is null) return;
 				var fishGO = fish.gameObject;
 
 				var name = fishGO.name + "_Sparks";
@@ -134,7 +169,7 @@ namespace TrashRadar {
 				sparkGO.transform.localScale = Vector3.one;
 				log.LogInfo($"Add sparkle to trash {fish.UniqueId}");
 				var particle = sparkGO.GetComponent<ParticleSystem>();
-				if (particle == null) return;
+				if (particle is null) return;
 				particle.startSize = 1.5f;
 				particle.startLifetime = 5f;
 			}
